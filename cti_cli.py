@@ -35,6 +35,11 @@ def api(method, path, **kwargs):
         sys.exit(1)
 
 
+def api_get_query(path, **kwargs):
+    """Make a GET API call with query params. Returns parsed JSON or raises."""
+    return api("GET", path, **kwargs)
+
+
 def detect_indicator_type(value):
     """Detect if value is an IP, domain, hash, CVE, or keyword."""
     import re
@@ -72,7 +77,7 @@ def investigate(indicator, as_json):
     """
     console.print(f"[dim]Investigating:[/dim] {indicator}")
     with console.status("[bold cyan]Running investigation pipeline..."):
-        data = api("POST", "/copilot/investigate", json={"query": indicator})
+        data = api("GET", "/copilot/investigate", params={"q": indicator})
 
     if as_json:
         click.echo(json.dumps(data, indent=2))
@@ -156,7 +161,7 @@ def hash_lookup(hash_value, as_json):
     """
     console.print(f"[dim]Looking up hash:[/dim] {hash_value}")
     with console.status("[bold cyan]Querying providers..."):
-        data = api("POST", "/copilot/investigate", json={"query": hash_value})
+        data = api("GET", "/copilot/investigate", params={"q": hash_value})
 
     if as_json:
         click.echo(json.dumps(data, indent=2))
@@ -292,7 +297,7 @@ def actor(name, as_json):
     """
     console.print(f"[dim]Looking up actor:[/dim] {name}")
     with console.status("[bold cyan]Searching actor data..."):
-        data = api("POST", "/copilot/investigate", json={"query": name})
+        data = api("GET", "/copilot/investigate", params={"q": name})
 
     if as_json:
         click.echo(json.dumps(data, indent=2))
