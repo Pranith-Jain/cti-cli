@@ -91,8 +91,8 @@ cti ransomware --json
 ## Authentication
 
 The hosted API at `https://pranithjain.qzz.io/api/v1/` now **requires an API key
-for every command**. Mint one from the admin panel (`/admin`) and provide it via
-the `CTI_API_KEY` environment variable or the `--api-key` flag:
+for every command**. To request one, reach out (see [Contact](#contact)), then
+provide it via the `CTI_API_KEY` environment variable or the `--api-key` flag:
 
 ```bash
 export CTI_API_KEY=<your-key>
@@ -105,6 +105,13 @@ cti --api-key <your-key> ransomware
 
 The AI-copilot commands (`investigate`, `actor`, `copilot`) additionally require an
 **admin**-scoped token.
+
+## Contact
+
+Need an API key, or have questions? Reach out:
+
+- LinkedIn: [linkedin.com/in/pranithjain](https://linkedin.com/in/pranithjain)
+- Email: [hello@pranithjain.qzz.io](mailto:hello@pranithjain.qzz.io)
 
 ## Configuration
 
