@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""cti-cli — Command-line threat intelligence powered by pranithjain.qzz.io"""
+"""cti-cli — Command-line threat intelligence powered by pranithjain.qzz.io.
+
+Configuration (env vars or global flags):
+  --base-url / CTI_API_BASE   API base (default https://pranithjain.qzz.io/api/v1)
+  --api-key  / CTI_API_KEY     bearer token for auth-gated endpoints (e.g. investigate)
+
+Exit codes: 0 ok · 1 API error · 2 network error · 3 auth required
+"""
 
 import json
+import re
 import sys
-import textwrap
+
 import click
 import requests
 from rich.console import Console
@@ -12,66 +20,106 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import box
 
-BASE = "https://pranithjain.qzz.io/api/v1"
+DEFAULT_BASE = "https://pranithjain.qzz.io/api/v1"
 console = Console()
 
+# Resolved from the CLI group (flags / env) before any command runs.
+BASE = DEFAULT_BASE
+API_KEY = None
 
-def api(method, path, **kwargs):
-    """Make an API call. Returns parsed JSON or raises."""
+EXIT_API = 1
+EXIT_NETWORK = 2
+EXIT_AUTH = 3
+
+
+def _headers(extra=None):
+    h = {"Accept": "application/json"}
+    if API_KEY:
+        h["Authorization"] = f"Bearer {API_KEY}"
+    if extra:
+        h.update(extra)
+    return h
+
+
+def api(method, path, *, stream=False, timeout=60, **kwargs):
+    """Call the API. Returns parsed JSON (or the raw Response when stream=True)."""
     url = BASE + path
+    headers = _headers(kwargs.pop("headers", None))
     try:
-        r = requests.request(method, url, timeout=60, **kwargs)
-        r.raise_for_status()
-        return r.json()
-    except requests.exceptions.HTTPError as e:
-        body = e.response.text[:300] if e.response else ""
-        console.print(f"[red]API error ({e.response.status_code}):[/red] {body}")
-        sys.exit(1)
+        r = requests.request(method, url, headers=headers, timeout=timeout, stream=stream, **kwargs)
     except requests.exceptions.ConnectionError:
-        console.print("[red]Cannot reach pranithjain.qzz.io — check your connection.[/red]")
-        sys.exit(1)
+        console.print(f"[red]Cannot reach {BASE}[/red] — check your connection or --base-url.")
+        sys.exit(EXIT_NETWORK)
     except requests.exceptions.Timeout:
-        console.print("[red]Request timed out (60s). The server may be busy.[/red]")
-        sys.exit(1)
+        console.print(f"[red]Request timed out ({timeout}s).[/red] The server may be busy.")
+        sys.exit(EXIT_NETWORK)
+    except requests.exceptions.RequestException as e:
+        console.print(f"[red]Request failed:[/red] {e}")
+        sys.exit(EXIT_NETWORK)
 
+    if r.status_code in (401, 403):
+        console.print(
+            "[red]Authentication required[/red] for this endpoint. "
+            "Set an API key via [bold]--api-key[/bold] or the [bold]CTI_API_KEY[/bold] env var."
+        )
+        sys.exit(EXIT_AUTH)
+    if not r.ok:
+        detail = ""
+        try:
+            detail = r.json().get("message") or r.json().get("error") or ""
+        except ValueError:
+            detail = (r.text or "")[:200]
+        console.print(f"[red]API error ({r.status_code}):[/red] {detail}")
+        sys.exit(EXIT_API)
 
-def api_get_query(path, **kwargs):
-    """Make a GET API call with query params. Returns parsed JSON or raises."""
-    return api("GET", path, **kwargs)
+    if stream:
+        return r
+    try:
+        return r.json()
+    except ValueError:
+        console.print("[red]Server returned a non-JSON response.[/red]")
+        sys.exit(EXIT_API)
 
 
 def detect_indicator_type(value):
-    """Detect if value is an IP, domain, hash, CVE, or keyword."""
-    import re
+    """Detect if value is an IP, domain, hash, CVE, URL, or keyword."""
     v = value.strip()
-    if re.match(r'^CVE-\d{4}-\d{4,}$', v, re.I):
+    if re.match(r"^CVE-\d{4}-\d{4,}$", v, re.I):
         return "cve"
-    if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', v):
+    if re.match(r"^https?://", v, re.I):
+        return "url"
+    if re.match(r"^(\d{1,3}\.){3}\d{1,3}$", v):
         return "ip"
-    if re.match(r'^[a-fA-F0-9]{32,64}$', v):
+    if re.match(r"^[a-fA-F0-9]{32,64}$", v):
         return "hash"
-    if re.match(r'^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$', v):
+    if re.match(r"^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$", v):
         return "domain"
     return "keyword"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-@click.group()
-@click.version_option("1.0.0", prog_name="cti")
-def cli():
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--base-url", envvar="CTI_API_BASE", default=DEFAULT_BASE,
+              help="API base URL (env: CTI_API_BASE).")
+@click.option("--api-key", envvar="CTI_API_KEY", default=None,
+              help="Bearer token for auth-gated endpoints (env: CTI_API_KEY).")
+@click.version_option("1.1.0", prog_name="cti")
+def cli(base_url, api_key):
     """cti-cli — Threat Intelligence from the command line.
 
-    Powered by pranithjain.qzz.io — 13+ live feeds, AI copilot, IOC checker.
+    Powered by pranithjain.qzz.io — live feeds, IOC checker, CVE/actor lookups.
     """
-    pass
+    global BASE, API_KEY
+    BASE = base_url.rstrip("/")
+    API_KEY = api_key
 
 
 @cli.command()
 @click.argument("indicator")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def investigate(indicator, as_json):
-    """Run an AI investigation on any indicator.
+    """Run an AI investigation on any indicator (auth-gated; needs --api-key).
 
     Accepts: IP, domain, hash (MD5/SHA1/SHA256), CVE ID, actor name, or keyword.
     """
@@ -83,7 +131,6 @@ def investigate(indicator, as_json):
         click.echo(json.dumps(data, indent=2))
         return
 
-    # Header
     qtype = data.get("query_type", "unknown")
     model = data.get("model_used", "unknown")
     console.print()
@@ -93,20 +140,17 @@ def investigate(indicator, as_json):
         border_style="cyan",
     ))
 
-    # Sources summary
     sources = data.get("sources", [])
     if sources:
         tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold")
         tbl.add_column("Source", style="cyan")
         tbl.add_column("Results", justify="right")
         for s in sources:
-            tbl.add_row(s["name"], str(s["items"]))
+            tbl.add_row(str(s.get("name", "?")), str(s.get("items", 0)))
         console.print(tbl)
         console.print()
 
-    # Narrative
-    narrative = data.get("narrative", "No narrative generated.")
-    console.print(Markdown(narrative))
+    console.print(Markdown(data.get("narrative", "No narrative generated.")))
 
 
 @cli.command()
@@ -114,13 +158,9 @@ def investigate(indicator, as_json):
 @click.option("--limit", "-n", default=50, help="Max results per section")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def search(query, limit, as_json):
-    """Search across 12+ threat intel sources.
-
-    Searches ransomware victims, C2 IPs, live IOCs, detections, actors, CVEs,
-    writeups, cybercrime, IOC correlation, breaches, malware samples, malpedia.
-    """
+    """Search across live threat-intel sources (ransomware, IOCs, actors, CVEs...)."""
     console.print(f"[dim]Searching:[/dim] {query}")
-    with console.status("[bold cyan]Searching 12+ sources..."):
+    with console.status("[bold cyan]Searching all sources..."):
         data = api("GET", "/unified-search", params={"q": query})
 
     if as_json:
@@ -136,8 +176,7 @@ def search(query, limit, as_json):
         if not items:
             continue
         label = sec.get("label", "Unknown")
-        kind = sec.get("kind", "")
-        console.print(f"[bold cyan]{label}[/bold cyan] ({len(items)})")
+        console.print(f"[bold cyan]{label}[/bold cyan] ({sec.get('total', len(items))})")
         for item in items[:limit]:
             name = item.get("label", "")
             desc = item.get("description", "")
@@ -152,60 +191,10 @@ def search(query, limit, as_json):
 
 
 @cli.command()
-@click.argument("hash_value")
-@click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
-def hash_lookup(hash_value, as_json):
-    """Look up a file hash across live enrichment providers.
-
-    Checks VirusTotal, MalwareBazaar, MalShare, OTX, and more.
-    """
-    console.print(f"[dim]Looking up hash:[/dim] {hash_value}")
-    with console.status("[bold cyan]Querying providers..."):
-        data = api("GET", "/copilot/investigate", params={"q": hash_value})
-
-    if as_json:
-        click.echo(json.dumps(data, indent=2))
-        return
-
-    # Extract enrichment data
-    enrichment = None
-    for s in data.get("sources", []):
-        if s["name"] == "Live Enrichment":
-            enrichment = s.get("data", {})
-            break
-
-    if enrichment:
-        providers = enrichment.get("providers", [])
-        tbl = Table(box=box.ROUNDED, title="Hash Enrichment", show_header=True)
-        tbl.add_column("Provider", style="cyan")
-        tbl.add_column("Verdict")
-        tbl.add_column("Score", justify="right")
-        tbl.add_column("Tags")
-        for p in providers:
-            verdict = p.get("verdict", "unknown")
-            score = p.get("score", 0)
-            color = {"clean": "green", "malicious": "red", "suspicious": "yellow"}.get(verdict, "dim")
-            tags = ", ".join(p.get("tags", [])[:3])
-            tbl.add_row(
-                p.get("source", "?"),
-                f"[{color}]{verdict}[/{color}]",
-                str(score),
-                tags,
-            )
-        console.print(tbl)
-    else:
-        console.print("[yellow]No enrichment data found.[/yellow]")
-
-    # Narrative
-    console.print()
-    console.print(Markdown(data.get("narrative", "")))
-
-
-@cli.command()
 @click.argument("cve_id")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def cve(cve_id, as_json):
-    """Look up a CVE — CVSS, EPSS, KEV status, related writeups.
+    """Look up a CVE — CVSS, CWE, KEV status, PoCs, references.
 
     Example: cti cve CVE-2024-1709
     """
@@ -217,33 +206,47 @@ def cve(cve_id, as_json):
         click.echo(json.dumps(data, indent=2))
         return
 
-    cve_data = data.get("cve", data)
+    d = data.get("cve", data)
+    cvss = d.get("cvss") or {}
+    kev = d.get("kev") or {}
+
     console.print()
     console.print(Panel(
-        f"[bold]{cve_data.get('id', cve_id)}[/bold]\n"
-        f"Severity: [bold]{cve_data.get('severity', 'N/A')}[/bold]  ·  "
-        f"CVSS: {cve_data.get('cvss', {}).get('base_score', 'N/A')}  ·  "
-        f"KEV: {'Yes' if cve_data.get('kev', {}).get('in_kev') else 'No'}",
+        f"[bold]{d.get('cve_id', cve_id)}[/bold]\n"
+        f"Severity: [bold]{cvss.get('severity', 'N/A')}[/bold]  ·  "
+        f"CVSS {cvss.get('version', '')}: {cvss.get('base_score', 'N/A')}  ·  "
+        f"KEV: {'[red]Yes[/red]' if kev.get('in_kev') else 'No'}",
         title="CVE Lookup",
-        border_style="cyan",
+        border_style="red" if kev.get("in_kev") else "cyan",
     ))
 
-    desc = cve_data.get("description", "No description.")
-    console.print(f"\n{desc[:500]}\n")
+    console.print(f"\n{(d.get('description') or 'No description.')[:600]}\n")
 
-    epss = cve_data.get("epss", {})
-    if epss:
-        console.print(f"EPSS: [bold]{epss.get('score', 'N/A')}[/bold] (percentile: {epss.get('percentile', 'N/A')})")
+    cwe = d.get("cwe")
+    if cwe:
+        console.print(f"CWE: {cwe if isinstance(cwe, str) else ', '.join(cwe)}")
+    if cvss.get("vector"):
+        console.print(f"Vector: [dim]{cvss['vector']}[/dim]")
 
-    kev = cve_data.get("kev", {})
-    if kev and kev.get("in_kev"):
-        console.print(f"[red]CISA KEV:[/red] Added {kev.get('date_added', 'N/A')} — {kev.get('vulnerability_name', '')}")
+    if kev.get("in_kev"):
+        extra = " · [red]known ransomware[/red]" if kev.get("known_ransomware") else ""
+        console.print(
+            f"[red]CISA KEV:[/red] added {kev.get('date_added', 'N/A')} — "
+            f"{kev.get('vulnerability_name', '')}{extra}"
+        )
 
-    refs = cve_data.get("references", [])
+    poc = d.get("poc")
+    poc_urls = poc.get("urls", []) if isinstance(poc, dict) else (poc or [])
+    if poc_urls:
+        console.print(f"\n[yellow]Public PoCs ({len(poc_urls)}):[/yellow]")
+        for p in poc_urls[:5]:
+            console.print(f"  {p if isinstance(p, str) else p.get('url', p)}")
+
+    refs = d.get("references") or []
     if refs:
         console.print(f"\n[dim]References ({len(refs)}):[/dim]")
         for ref in refs[:5]:
-            console.print(f"  {ref}")
+            console.print(f"  {ref if isinstance(ref, str) else ref.get('url', ref)}")
 
 
 @cli.command()
@@ -251,8 +254,7 @@ def cve(cve_id, as_json):
 @click.option("--group", "-g", default=None, help="Filter by group name")
 def ransomware(as_json, group):
     """Show recent ransomware activity — victims, groups, sectors."""
-    console.print("[dim]Fetching ransomware data...[/dim]")
-    with console.status("[bold cyan]Loading..."):
+    with console.status("[bold cyan]Loading ransomware activity..."):
         data = api("GET", "/ransomware-recent")
 
     if as_json:
@@ -261,7 +263,6 @@ def ransomware(as_json, group):
 
     victims = data.get("victims", [])
     groups = data.get("groups", [])
-
     if group:
         victims = [v for v in victims if group.lower() in v.get("group", "").lower()]
 
@@ -277,21 +278,21 @@ def ransomware(as_json, group):
             v.get("group", "?"),
             v.get("victim", "?"),
             v.get("sector", "—"),
-            v.get("discovered", "")[:10],
+            (v.get("discovered", "") or "")[:10],
         )
     console.print(tbl)
 
     if groups:
-        console.print(f"\n[bold]Active groups:[/bold]")
+        console.print("\n[bold]Most active groups:[/bold]")
         for g in sorted(groups, key=lambda x: x.get("count", 0), reverse=True)[:10]:
-            console.print(f"  • {g['group']} — {g['count']} victims")
+            console.print(f"  • {g.get('group', '?')} — {g.get('count', 0)} victims")
 
 
 @cli.command()
 @click.argument("name")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def actor(name, as_json):
-    """Look up a threat actor — timeline, TTPs, victims, CVEs.
+    """Look up a threat actor (auth-gated; needs --api-key).
 
     Example: cti actor LockBit
     """
@@ -310,17 +311,17 @@ def actor(name, as_json):
         border_style="red",
     ))
 
-    sources = data.get("sources", [])
-    for s in sources:
-        if s["items"] > 0:
-            console.print(f"\n[bold cyan]{s['name']}[/bold cyan] ({s['items']} results)")
+    for s in data.get("sources", []):
+        if s.get("items", 0) > 0:
+            console.print(f"\n[bold cyan]{s.get('name')}[/bold cyan] ({s['items']} results)")
             items = s.get("data", [])
             if isinstance(items, list):
                 for item in items[:5]:
                     if isinstance(item, dict):
-                        name_val = item.get("display_name") or item.get("victim") or item.get("title") or item.get("id", "")
-                        desc = item.get("description", "")[:80]
-                        console.print(f"  • {name_val}  [dim]{desc}[/dim]")
+                        nm = (item.get("display_name") or item.get("victim")
+                              or item.get("title") or item.get("id", ""))
+                        desc = (item.get("description", "") or "")[:80]
+                        console.print(f"  • {nm}  [dim]{desc}[/dim]")
 
     console.print()
     console.print(Markdown(data.get("narrative", "")))
@@ -330,81 +331,112 @@ def actor(name, as_json):
 @click.argument("indicator")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def check(indicator, as_json):
-    """Check an IOC against 24+ providers (streaming verdict).
+    """Check an IOC against live providers (streaming verdict).
 
     Accepts: IP, domain, URL, or hash.
     """
     itype = detect_indicator_type(indicator)
-    kind_map = {"ip": "ipv4", "domain": "domain", "hash": "hash", "url": "url"}
-    kind = kind_map.get(itype)
-    if not kind:
-        console.print(f"[red]Cannot determine indicator type for: {indicator}[/red]")
-        sys.exit(1)
+    if itype not in ("ip", "domain", "hash", "url"):
+        console.print(f"[red]Cannot determine a checkable indicator type for:[/red] {indicator}")
+        sys.exit(EXIT_API)
 
-    console.print(f"[dim]Checking {kind}:[/dim] {indicator}")
+    console.print(f"[dim]Checking {itype}:[/dim] {indicator}")
     results = []
+    overall = None
 
-    with console.status("[bold cyan]Streaming from 24+ providers..."):
-        r = requests.get(f"{BASE}/ioc/check", params={"indicator": indicator}, stream=True, timeout=120)
+    with console.status("[bold cyan]Streaming from providers..."):
+        r = api("GET", "/ioc/check", params={"indicator": indicator}, stream=True, timeout=120)
         for line in r.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
             try:
                 payload = json.loads(line[5:].strip())
-                if payload.get("type") == "result":
-                    results.append(payload)
-                elif payload.get("type") == "done":
-                    break
             except json.JSONDecodeError:
                 continue
+            # Stream shape: a meta line (has "type"+"providers"), then one line per
+            # provider (has "source"), then a final summary line (has "contributing").
+            if "source" in payload:
+                results.append(payload)
+            elif "contributing" in payload or "confidence" in payload:
+                overall = payload
 
     if as_json:
-        click.echo(json.dumps(results, indent=2))
+        click.echo(json.dumps({"results": results, "overall": overall}, indent=2))
         return
 
-    tbl = Table(box=box.ROUNDED, title=f"IOC Check: {indicator}", show_header=True)
+    color_for = {"clean": "green", "malicious": "red", "suspicious": "yellow"}
+    if overall:
+        v = overall.get("verdict", "unknown")
+        adm = overall.get("admiralty", {}).get("label", "")
+        console.print()
+        console.print(Panel(
+            f"[bold]{indicator}[/bold]  ·  verdict "
+            f"[{color_for.get(v, 'dim')}]{v.upper()}[/{color_for.get(v, 'dim')}]  ·  "
+            f"score {overall.get('score', 0)}  ·  confidence {overall.get('confidence', '?')}"
+            + (f"  ·  {adm}" if adm else ""),
+            title=f"IOC Check: {indicator}",
+            border_style=color_for.get(v, "cyan"),
+        ))
+
+    reported = [r for r in results if r.get("status") not in ("unsupported", "error")]
+    tbl = Table(box=box.ROUNDED, title=f"{len(reported)} providers reporting", show_header=True)
     tbl.add_column("Provider", style="cyan")
     tbl.add_column("Verdict")
     tbl.add_column("Score", justify="right")
     tbl.add_column("Tags")
-    for r in results:
-        d = r.get("data", {})
+    for d in reported:
         verdict = d.get("verdict", "unknown")
-        score = d.get("score", 0)
-        color = {"clean": "green", "malicious": "red", "suspicious": "yellow"}.get(verdict, "dim")
-        tags = ", ".join(d.get("tags", [])[:3])
+        tags = ", ".join((d.get("tags") or [])[:3])
         tbl.add_row(
-            d.get("source", r.get("provider", "?")),
-            f"[{color}]{verdict}[/{color}]",
-            str(score),
+            d.get("source", "?"),
+            f"[{color_for.get(verdict, 'dim')}]{verdict}[/{color_for.get(verdict, 'dim')}]",
+            str(d.get("score", 0)),
             tags,
         )
     console.print(tbl)
 
 
-@cli.command()
-@click.argument("ip")
+@cli.command("hash-lookup")
+@click.argument("hash_value")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
-def ip(ip, as_json):
-    """Geolocate an IP — country, ASN, ISP, proxy/VPN flags."""
-    console.print(f"[dim]Looking up:[/dim] {ip}")
+@click.pass_context
+def hash_lookup(ctx, hash_value, as_json):
+    """Look up a file hash across live enrichment providers.
+
+    Runs the public IOC checker (VirusTotal, MalwareBazaar, OTX, and more) —
+    no API key required.
+    """
+    if not re.fullmatch(r"[a-fA-F0-9]{32,64}", hash_value.strip()):
+        console.print("[red]Not a valid MD5/SHA1/SHA256 hash.[/red]")
+        sys.exit(EXIT_API)
+    ctx.invoke(check, indicator=hash_value.strip(), as_json=as_json)
+
+
+@cli.command()
+@click.argument("ip_addr")
+@click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
+def ip(ip_addr, as_json):
+    """Geolocate an IP — country, city, reverse DNS, proxy/VPN/Tor flags."""
+    console.print(f"[dim]Looking up:[/dim] {ip_addr}")
     with console.status("[bold cyan]Querying..."):
-        data = api("GET", "/ip-geo", params={"ip": ip})
+        data = api("GET", "/ip-geo", params={"ip": ip_addr})
 
     if as_json:
         click.echo(json.dumps(data, indent=2))
         return
 
+    geo = data.get("geo") or {}
+    priv = data.get("privacy") or {}
+    flags = [k for k in ("vpn", "proxy", "tor", "relay", "hosting") if priv.get(k)]
     console.print()
     console.print(Panel(
-        f"[bold]{ip}[/bold]\n"
-        f"Country: {data.get('country', 'N/A')}  ·  "
-        f"ASN: {data.get('asn', 'N/A')}  ·  "
-        f"ISP: {data.get('isp', 'N/A')}\n"
-        f"Proxy: {data.get('proxy', 'N/A')}  ·  "
-        f"Hosting: {data.get('hosting', 'N/A')}",
+        f"[bold]{data.get('ip', ip_addr)}[/bold]  ·  [dim]{data.get('detected_kind', '')}[/dim]\n"
+        f"Location: {geo.get('city', 'N/A')}, {geo.get('region', '')} {geo.get('country', 'N/A')}\n"
+        f"Reverse DNS: {geo.get('reverse_dns', 'N/A')}\n"
+        f"Privacy flags: "
+        + ("[red]" + ", ".join(flags) + "[/red]" if flags else "[green]none[/green]"),
         title="IP Geolocation",
-        border_style="cyan",
+        border_style="red" if flags else "cyan",
     ))
 
 
@@ -412,7 +444,7 @@ def ip(ip, as_json):
 @click.argument("domain_name")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 def domain(domain_name, as_json):
-    """Domain lookup — WHOIS, DNS, email auth, CT logs."""
+    """Domain lookup — verdict, DNS, email auth, RDAP, certificates."""
     console.print(f"[dim]Looking up:[/dim] {domain_name}")
     with console.status("[bold cyan]Querying..."):
         data = api("GET", "/domain/lookup", params={"domain": domain_name})
@@ -421,21 +453,33 @@ def domain(domain_name, as_json):
         click.echo(json.dumps(data, indent=2))
         return
 
+    verdict = data.get("verdict", "unknown")
+    color = {"clean": "green", "malicious": "red", "suspicious": "yellow"}.get(verdict, "cyan")
     console.print()
-    for section_name, section_data in data.items():
-        if isinstance(section_data, dict) and section_data:
-            console.print(f"[bold cyan]{section_name}[/bold cyan]")
-            for k, v in section_data.items():
-                if v:
-                    console.print(f"  {k}: {v}")
-            console.print()
+    console.print(Panel(
+        f"[bold]{data.get('domain', domain_name)}[/bold]  ·  "
+        f"verdict [{color}]{verdict}[/{color}]  ·  score {data.get('score', 'N/A')}",
+        title="Domain Lookup",
+        border_style=color,
+    ))
+
+    for section in ("dns", "email_auth", "rdap", "certificates", "threat_intel"):
+        sd = data.get(section)
+        if isinstance(sd, dict) and sd:
+            console.print(f"\n[bold cyan]{section}[/bold cyan]")
+            for k, v in sd.items():
+                if v in (None, "", [], {}):
+                    continue
+                if isinstance(v, (list, dict)):
+                    v = json.dumps(v)[:120]
+                console.print(f"  {k}: {v}")
 
 
 @cli.command()
 @click.argument("text", required=False)
 @click.option("--file", "-f", type=click.Path(exists=True), help="Read from file")
 def extract(text, file):
-    """Extract IOCs (IPs, domains, hashes, URLs, CVEs) from text or file."""
+    """Extract IOCs (IPs, domains, hashes, URLs, CVEs) from text, file, or stdin."""
     if file:
         with open(file) as fh:
             raw = fh.read()
@@ -446,22 +490,20 @@ def extract(text, file):
 
     if not raw.strip():
         console.print("[red]No input provided.[/red]")
-        sys.exit(1)
+        sys.exit(EXIT_API)
 
-    import re
     iocs = {
-        "ipv4": list(set(re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', raw))),
-        "domain": list(set(re.findall(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b', raw))),
-        "sha256": list(set(re.findall(r'\b[a-fA-F0-9]{64}\b', raw))),
-        "sha1": list(set(re.findall(r'\b[a-fA-F0-9]{40}\b', raw))),
-        "md5": list(set(re.findall(r'\b[a-fA-F0-9]{32}\b', raw))),
-        "url": list(set(re.findall(r'https?://[^\s<>"\']+', raw))),
-        "cve": list(set(re.findall(r'CVE-\d{4}-\d{4,}', raw, re.I))),
+        "ipv4": sorted(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", raw))),
+        "domain": sorted(set(re.findall(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b", raw))),
+        "sha256": sorted(set(re.findall(r"\b[a-fA-F0-9]{64}\b", raw))),
+        "sha1": sorted(set(re.findall(r"\b[a-fA-F0-9]{40}\b", raw))),
+        "md5": sorted(set(re.findall(r"\b[a-fA-F0-9]{32}\b", raw))),
+        "url": sorted(set(re.findall(r"https?://[^\s<>\"']+", raw))),
+        "cve": sorted(set(re.findall(r"CVE-\d{4}-\d{4,}", raw, re.I))),
     }
 
     total = sum(len(v) for v in iocs.values())
     console.print(f"\n[bold]{total}[/bold] IOCs extracted:\n")
-
     for kind, values in iocs.items():
         if values:
             console.print(f"[bold cyan]{kind}[/bold cyan] ({len(values)})")
@@ -473,9 +515,8 @@ def extract(text, file):
 
 
 @cli.command()
-@click.option("--days", "-d", default=7, help="Number of days")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
-def briefings(as_json, days):
+def briefings(as_json):
     """Show recent threat briefings."""
     with console.status("[bold cyan]Loading briefings..."):
         data = api("GET", "/briefings/list")
@@ -484,38 +525,49 @@ def briefings(as_json, days):
         click.echo(json.dumps(data, indent=2))
         return
 
-    items = data.get("briefings", [])
-    console.print(f"\n[bold]{len(items)}[/bold] briefings\n")
+    items = data.get("items", data.get("briefings", []))
+    console.print(f"\n[bold]{data.get('total', len(items))}[/bold] briefings\n")
     for b in items[:10]:
+        meta = b.get("metadata", b)
         slug = b.get("slug", "")
-        title = b.get("title", slug)
-        date = b.get("published_at", "")[:10]
-        findings = b.get("stats", {}).get("findings", 0)
-        iocs = b.get("stats", {}).get("iocs", 0)
+        title = meta.get("title", slug)
+        date = (meta.get("date") or meta.get("published_at", ""))[:10]
+        stats = meta.get("stats", {})
         console.print(f"  [cyan]{date}[/cyan]  {title}")
-        console.print(f"    [dim]{findings} findings · {iocs} IOCs[/dim]")
+        console.print(
+            f"    [dim]{stats.get('findings', 0)} findings · "
+            f"{stats.get('cves', 0)} CVEs · {stats.get('iocs', 0)} IOCs[/dim]   [dim]{slug}[/dim]"
+        )
 
 
 @cli.command()
 def feed_status():
-    """Show health status of all live threat intel feeds."""
+    """Show health status of all live threat-intel feeds."""
     with console.status("[bold cyan]Checking feeds..."):
         data = api("GET", "/feed-status")
 
-    sources = data.get("sources", [])
+    rows = data.get("rows", data.get("sources", []))
+    overall = data.get("overall", "?")
+    console.print(
+        f"\nOverall: [bold]{overall}[/bold]  ·  "
+        f"{data.get('total_sources', len(rows))} sources  ·  "
+        f"[green]{data.get('healthy', 0)} healthy[/green] · "
+        f"[yellow]{data.get('degraded', 0)} degraded[/yellow] · "
+        f"[red]{data.get('down', 0)} down[/red] · {data.get('cold', 0)} cold\n"
+    )
+
+    status_color = {"healthy": "green", "degraded": "yellow", "down": "red", "cold": "dim"}
     tbl = Table(box=box.SIMPLE, title="Feed Status", show_header=True)
     tbl.add_column("Feed", style="cyan")
     tbl.add_column("Status")
-    tbl.add_column("Items", justify="right")
-    tbl.add_column("Age", style="dim")
-    for s in sources:
-        ok = s.get("ok", False)
-        status = "[green]OK[/green]" if ok else "[red]DOWN[/red]"
+    tbl.add_column("Grade", justify="center")
+    for s in rows:
+        st = s.get("status", "?")
+        c = status_color.get(st, "dim")
         tbl.add_row(
-            s.get("id", "?"),
-            status,
-            str(s.get("count", "—")),
-            s.get("age", "—"),
+            s.get("label", s.get("id", "?")),
+            f"[{c}]{st}[/{c}]",
+            s.get("admiralty_grade", s.get("reliability", "—")),
         )
     console.print(tbl)
 
@@ -523,9 +575,9 @@ def feed_status():
 @cli.command()
 @click.argument("query")
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
-def copilot(query, as_json):
-    """Alias for investigate — run AI copilot on any query."""
-    ctx = click.get_current_context()
+@click.pass_context
+def copilot(ctx, query, as_json):
+    """Alias for `investigate` — run the AI copilot on any query (auth-gated)."""
     ctx.invoke(investigate, indicator=query, as_json=as_json)
 
 
