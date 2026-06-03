@@ -88,20 +88,31 @@ cti ransomware --json
 | `feed-status` | Health status of all live feeds |
 | `copilot` | Alias for investigate *(auth-gated)* |
 
+## Authentication
+
+The hosted API at `https://pranithjain.qzz.io/api/v1/` now **requires an API key
+for every command**. Mint one from the admin panel (`/admin`) and provide it via
+the `CTI_API_KEY` environment variable or the `--api-key` flag:
+
+```bash
+export CTI_API_KEY=<your-key>
+cti check 8.8.8.8
+cti cve CVE-2024-1709
+
+# or per-invocation
+cti --api-key <your-key> ransomware
+```
+
+The AI-copilot commands (`investigate`, `actor`, `copilot`) additionally require an
+**admin**-scoped token.
+
 ## Configuration
 
-Override the API endpoint or supply an API key via flags or environment variables:
+Point the CLI at a different deployment with `--base-url` / `CTI_API_BASE`:
 
 ```bash
 cti --base-url http://localhost:8787/api/v1 feed-status   # or CTI_API_BASE
-cti --api-key "$TOKEN" investigate LockBit                # or CTI_API_KEY
 ```
-
-## API
-
-Most commands call the public API at `https://pranithjain.qzz.io/api/v1/` and need
-**no API key** (rate-limited to 30 req/min). The AI-copilot commands — `investigate`,
-`actor`, and `copilot` — are auth-gated; pass `--api-key` / `CTI_API_KEY` to use them.
 
 Exit codes: `0` ok · `1` API error · `2` network error · `3` auth required.
 
