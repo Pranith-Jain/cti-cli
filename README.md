@@ -2,7 +2,7 @@
 
 Command-line threat intelligence powered by [pranithjain.qzz.io](https://pranithjain.qzz.io).
 
-13+ live feeds · AI copilot · 24+ IOC enrichment providers · ransomware tracking · CVE lookup · actor KB.
+13+ live feeds · AI copilot · 60+ IOC enrichment providers · ransomware tracking · CVE lookup · actor KB.
 
 ## Install
 
@@ -30,7 +30,7 @@ cti investigate <sha256>
 # Search across 12+ threat intel sources
 cti search "Cobalt Strike"
 
-# Check an IOC against 24+ providers
+# Check an IOC against 60+ enrichment & blocklist providers
 cti check 185.234.72.0
 
 # Hash lookup with enrichment
@@ -76,7 +76,7 @@ cti ransomware --json
 |---------|-------------|
 | `investigate` | AI investigation on any indicator (IP, domain, hash, CVE, actor, keyword) |
 | `search` | Search across 12+ threat intel sources |
-| `check` | Check IOC against 24+ enrichment providers (streaming) |
+| `check` | Check IOC against 60+ enrichment & blocklist providers (streaming) |
 | `hash-lookup` | Hash enrichment — VirusTotal, MalwareBazaar, MalShare, OTX |
 | `cve` | CVE lookup — CVSS, CWE, KEV status, public PoCs, references |
 | `ransomware` | Recent ransomware victims and groups |
